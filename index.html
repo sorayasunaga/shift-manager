@@ -742,7 +742,7 @@
         onkeydown="if(event.key==='Enter')doLogin()">
     </div>
 
-    <button class="login-btn" onclick="doLogin()">
+    <button class="login-btn" id="login-btn" onclick="doLogin()">
       <i class="ti ti-login" style="font-size:16px"></i>ログイン
     </button>
 
@@ -1264,6 +1264,7 @@
 
         <!-- 提出状況サマリー -->
         <div class="summary-row" style="grid-template-columns:repeat(4,1fr);margin-bottom:16px" id="wish-summary"></div>
+        <div id="wish-release"></div>
 
         <!-- 提出状況テーブル -->
         <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);overflow:hidden;box-shadow:var(--shadow);margin-bottom:16px">
@@ -1648,7 +1649,7 @@ async function switchStore(storeId) {
   // データをリセットしてFirestoreから再読み込み
   staffData = []; shiftData = []; wishData = []; createConfirmed = [];
   adjustData = []; adjustRowOrder = {}; helpData = []; shiftRecords = {}; publishLog = []; staffOrder = [];
-  payrollSettings = Object.assign({}, PAYROLL_DEFAULTS);
+  payrollSettings = Object.assign({}, PAYROLL_DEFAULTS); submitOverrides = { periods:{}, staff:{} };
   await loadInitialData();
 
   // シフト管理ページに戻る
@@ -1683,6 +1684,8 @@ let helpData        = []; // 他店舗からの応援スタッフ（{id,fromStor
 let shiftRecords    = {};
 let publishLog      = []; // 公開履歴（記録メニュー用）[{weekLabel,dateFrom,dateTo,publishedAt,publishedBy}]
 let staffOrder      = []; // スタッフ名簿の表示順（氏名の配列。staffDataの並びは変えない）
+// 提出期限の手動解放。periods[絶対キー]=true で全体解放、staff[絶対キー]=[氏名...] で個人解放
+let submitOverrides = { periods: {}, staff: {} };
 
 function initDefaultData() {
   staffData       = DEFAULT_STAFF.map(s => Object.assign({}, s));
@@ -1929,6 +1932,7 @@ async function loadInitialData() {
         payrollSettings = Object.assign({}, PAYROLL_DEFAULTS, raw.payrollSettings || {});
         publishLog = Array.isArray(raw.publishLog) ? raw.publishLog : [];
         staffOrder = Array.isArray(raw.staffOrder) ? raw.staffOrder : [];
+        submitOverrides = (raw.submitOverrides && typeof raw.submitOverrides==="object") ? { periods: raw.submitOverrides.periods||{}, staff: raw.submitOverrides.staff||{} } : { periods:{}, staff:{} };
         console.log('✅ 読込成功:', staffData.length, '名');
       } else {
         console.warn('⚠ staffが空。デフォルト初期化して保存');
@@ -2856,6 +2860,23 @@ function renderWish() {
     <div class="summary-card"><div class="s-label">未提出</div><div class="s-value${pending>0?' value-danger':''}">${pending}<span class="unit">名</span></div></div>
     <div class="summary-card"><div class="s-label">提出率</div><div class="s-value${total>0&&submitted===total?' value-success':''}">${total>0?Math.round(submitted/total*100):0}<span class="unit">%</span></div></div>`;
 
+  // 期限の解放コントロール（管理者用）
+  const relEl = document.getElementById('wish-release');
+  if (relEl && reviewPeriod) {
+    const released = isPeriodReleased(reviewPeriod);
+    const past = reviewPeriod.isPastDeadline;
+    relEl.innerHTML =
+      `<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;background:${released ? 'rgba(29,138,94,0.08)' : 'var(--surface2)'};border:1px solid ${released ? 'rgba(29,138,94,0.3)' : 'var(--border)'};border-radius:var(--radius);padding:10px 14px;margin-bottom:14px">
+        <span style="font-size:13px;font-weight:700">提出期限：<span style="color:${past ? 'var(--red-text)' : 'var(--text2)'}">${reviewPeriod.deadline}${past ? '（期限切れ）' : ''}</span></span>
+        ${released
+          ? `<span style="font-size:12px;font-weight:700;color:#0F5238">🔓 この期間を全員に解放中</span>
+             <button class="btn btn-sm" style="margin-left:auto;color:var(--red);border-color:rgba(192,57,43,0.3)" onclick="togglePeriodRelease()"><i class="ti ti-lock"></i>解放を締める</button>`
+          : `<span style="font-size:11px;color:var(--text3)">期限後も提出できるよう解放できます（全員 or 個人）</span>
+             <button class="btn btn-sm btn-primary" style="margin-left:auto" onclick="togglePeriodRelease()"><i class="ti ti-lock-open"></i>全員に解放</button>`
+        }
+      </div>`;
+  } else if (relEl) { relEl.innerHTML = ''; }
+
   // バッジ更新（PC + スマホ）
   const badge = document.getElementById('wish-badge');
   if (badge) { badge.textContent = pending > 0 ? pending : ''; }
@@ -2889,10 +2910,13 @@ function renderWish() {
       <div><span class="${isSub ? 'wish-status-ok' : 'wish-status-ng'}">${isSub ? '提出済' : '未提出'}</span></div>
       <div style="color:var(--text3);font-size:11px">${isSub ? (subInfo.at || w.submittedAt || '') + ' 提出' : '〆切 ' + (reviewPeriod ? reviewPeriod.deadline : '')}</div>
       <div style="color:var(--text2)">${isSub ? `希望${activeCount}日 / 出勤不可${ngCount}日${wkDaysLabel ? '　<span style="color:var(--accent-text);font-weight:700">（' + wkDaysLabel + '）</span>' : ''}` : '—'}</div>
-      <div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap">
         ${isSub
           ? `<button class="btn btn-sm" style="font-size:11px;padding:3px 8px" onclick="showWishDetail(${i})"><i class="ti ti-eye" style="font-size:12px"></i>詳細</button>`
           : `<button class="btn btn-sm" style="font-size:11px;padding:3px 8px;color:var(--amber);border-color:rgba(176,106,16,0.3)" onclick="remindOne(${i})"><i class="ti ti-bell" style="font-size:12px"></i>催促</button>`
+            + (reviewPeriod && reviewPeriod.isPastDeadline && !isPeriodReleased(reviewPeriod)
+                ? `<button class="btn btn-sm" style="font-size:11px;padding:3px 8px;color:${isStaffReleased(reviewPeriod, s.name) ? '#0F5238' : 'var(--accent-text)'};border-color:${isStaffReleased(reviewPeriod, s.name) ? 'rgba(29,138,94,0.4)' : 'rgba(43,92,230,0.3)'}" onclick="toggleStaffRelease('${jsq(s.name)}')"><i class="ti ti-lock-open" style="font-size:12px"></i>${isStaffReleased(reviewPeriod, s.name) ? '解放中' : '解放'}</button>`
+                : '')
         }
       </div>
     </div>`;
@@ -3707,6 +3731,54 @@ function generatePeriods() {
 
 // 期間の「絶対キー」（年-月-前半/後半）。相対キー p0〜p3 と違い、期間が繰り上がっても不変。
 function periodAbsKey(p) { return `${p.year}-${p.month}-${p.half}`; }
+
+// 期限が解放されているか（全体 or そのスタッフ個人）
+function isPeriodReleased(p) {
+  return !!(p && submitOverrides.periods && submitOverrides.periods[periodAbsKey(p)]);
+}
+function isStaffReleased(p, name) {
+  if (!p || !name) return false;
+  const arr = submitOverrides.staff && submitOverrides.staff[periodAbsKey(p)];
+  return Array.isArray(arr) && arr.includes(name);
+}
+// 期限切れでも提出できる状態か（全体解放 or 個人解放）
+function isSubmitOpen(p, name) { return isPeriodReleased(p) || isStaffReleased(p, name); }
+
+// 全体解放のトグル（希望確認で選択中の期間）
+function togglePeriodRelease() {
+  const p = PERIODS[wishReviewPeriodIdx];
+  if (!p) return;
+  const k = periodAbsKey(p);
+  if (!submitOverrides.periods) submitOverrides.periods = {};
+  if (submitOverrides.periods[k]) delete submitOverrides.periods[k];
+  else submitOverrides.periods[k] = true;
+  saveSubmitOverrides();
+  renderWish();
+  showSaveIndicator(submitOverrides.periods[k] ? '🔓 期間を全員に解放しました' : '🔒 期間の解放を締めました');
+}
+// 個人解放のトグル（希望確認で選択中の期間・指定スタッフ）
+function toggleStaffRelease(name) {
+  const p = PERIODS[wishReviewPeriodIdx];
+  if (!p || !name) return;
+  const k = periodAbsKey(p);
+  if (!submitOverrides.staff) submitOverrides.staff = {};
+  if (!Array.isArray(submitOverrides.staff[k])) submitOverrides.staff[k] = [];
+  const arr = submitOverrides.staff[k];
+  const i = arr.indexOf(name);
+  if (i >= 0) arr.splice(i, 1); else arr.push(name);
+  if (!arr.length) delete submitOverrides.staff[k];
+  saveSubmitOverrides();
+  renderWish();
+  showSaveIndicator(i >= 0 ? name + ' の解放を取り消しました' : '🔓 ' + name + ' に解放しました');
+}
+window.togglePeriodRelease = togglePeriodRelease;
+window.toggleStaffRelease  = toggleStaffRelease;
+
+async function saveSubmitOverrides() {
+  try {
+    await setDoc(DATA_DOC, { submitOverrides: JSON.parse(JSON.stringify(submitOverrides)), savedAt: Date.now() }, { merge: true });
+  } catch (e) { console.error('提出解放の保存エラー:', e); showSaveIndicator('⚠ 保存失敗: ' + e.message, true); }
+}
 // そのスタッフが指定期間を提出済みか（絶対キーで判定。旧データはslotMapで判定）
 function hasSubmittedPeriod(w, p) {
   if (!w || !p) return false;
@@ -3730,16 +3802,21 @@ function initSubmitPage() {
   // 期間を現在日付から再生成してタブを描画
   PERIODS = generatePeriods();
   const isStaffRole = currentUser && currentUser.role === 'staff';
+  const myName = (isStaffRole && submitStaffIndex >= 0 && staffData[submitStaffIndex]) ? staffData[submitStaffIndex].name : null;
   const tabsWrap = document.getElementById('submit-period-tabs');
   tabsWrap.innerHTML = PERIODS.map((p, idx) => {
+    const open = isSubmitOpen(p, myName); // 管理者が解放していれば期限切れでも可
     const deadlineColor = p.isPastDeadline ? 'color:var(--red-text)' : 'color:var(--amber-text)';
-    // 期限切れの場合：スタッフは操作不可、管理者は操作可能
-    const isDisabled = isStaffRole && p.isPastDeadline;
-    const deadlineLabel = p.isPastDeadline
-      ? `<span style="font-size:9px;${deadlineColor};font-weight:700">
-          ${isStaffRole ? '⚠ 期限切れ' : '⚠ 期限切れ（管理者は提出可）'}（${p.deadline}）
-         </span>`
-      : `<span style="font-size:9px;${deadlineColor}">〆切 ${p.deadline}</span>`;
+    // 期限切れ かつ 未解放 の場合のみ、スタッフは操作不可
+    const isDisabled = isStaffRole && p.isPastDeadline && !open;
+    let deadlineLabel;
+    if (p.isPastDeadline && open) {
+      deadlineLabel = `<span style="font-size:9px;color:#0F5238;font-weight:700">🔓 解放中（提出できます）</span>`;
+    } else if (p.isPastDeadline) {
+      deadlineLabel = `<span style="font-size:9px;${deadlineColor};font-weight:700">${isStaffRole ? '⚠ 期限切れ' : '⚠ 期限切れ（管理者は提出可）'}（${p.deadline}）</span>`;
+    } else {
+      deadlineLabel = `<span style="font-size:9px;${deadlineColor}">〆切 ${p.deadline}</span>`;
+    }
     return `
     <div class="period-tab" id="tab-p${idx}"
       onclick="${isDisabled ? '' : `selectPeriodIdx(${idx})`}"
@@ -4290,40 +4367,80 @@ function generateStaffAccounts() {
 
 let currentUser = null;
 
-function doLogin() {
+async function doLogin() {
   const id = document.getElementById('login-id').value.trim().toLowerCase();
-  const pw = document.getElementById('login-pw').value;
+  const pw = document.getElementById('login-pw').value.trim();
+  const errEl = document.getElementById('login-error');
 
   // 管理者チェック
   if (id === 'admin' && pw === 'admin123') {
     currentUser = { id:'admin', pw:'admin123', role:'admin', name:'管理者', staffIndex:-1 };
-    document.getElementById('login-error').style.display = 'none';
+    errEl.style.display = 'none';
     document.getElementById('login-screen').style.display = 'none';
     applyRole();
     return;
   }
 
-  // staffDataのloginId・loginPwで照合
-  let found = null;
-  staffData.forEach((s, idx) => {
-    if (!found && s.loginId && s.loginId.toLowerCase() === id && (s.loginPw || '1234') === pw) {
-      found = { id: s.loginId, pw: s.loginPw, role:'staff', name: s.name, staffIndex: idx };
-    }
-  });
+  // ID・パスワードとも前後の空白を無視して照合（保存値側も trim）
+  const matchIn = (arr) => {
+    if (!Array.isArray(arr)) return -1;
+    return arr.findIndex(s => s && s.loginId
+      && String(s.loginId).trim().toLowerCase() === id
+      && String(s.loginPw || '1234').trim() === pw);
+  };
 
-  // 旧来のローマ字自動生成でも照合（loginIdが未設定のスタッフ向け）
+  // 1) まず現在の店舗で照合
+  let found = null;
+  let idx = matchIn(staffData);
+  if (idx >= 0) {
+    found = { id: staffData[idx].loginId, pw: staffData[idx].loginPw, role:'staff', name: staffData[idx].name, staffIndex: idx };
+  }
+
+  // 2) 旧来のローマ字自動生成（現店舗・loginId未設定者向け）
   if (!found) {
-    const accounts = generateStaffAccounts();
-    const account = accounts.find(a => a.id === id && a.pw === pw);
+    const account = generateStaffAccounts().find(a => a.id === id && a.pw === pw);
     if (account) found = account;
   }
 
+  // 3) 見つからなければ全店舗を検索して、その店舗を読み込んでログイン
   if (!found) {
-    document.getElementById('login-error').style.display = 'block';
+    const btn = document.getElementById('login-btn');
+    const prevTxt = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = '確認中…'; }
+    try {
+      for (const store of STORES) {
+        if (store.id === currentStoreId) continue;
+        let snap;
+        try { snap = await getDoc(getDataDoc(store.id)); } catch (e) { continue; }
+        if (!snap || !snap.exists()) continue;
+        const sdata = snap.data().staffData;
+        const mIdx = matchIn(sdata);
+        if (mIdx >= 0) {
+          // その店舗に切り替えて読み込む（保存先 DATA_DOC も必ず更新）
+          currentStoreId = store.id;
+          DATA_DOC = getDataDoc(store.id);
+          const sel = document.getElementById('store-select');
+          if (sel) sel.value = store.id;
+          const msel = document.getElementById('mobile-store-select');
+          if (msel) msel.value = store.id;
+          await loadInitialData();
+          const idx2 = matchIn(staffData);
+          const nm = (idx2 >= 0 ? staffData[idx2].name : (sdata[mIdx] && sdata[mIdx].name)) || '';
+          found = { id, pw, role:'staff', name: nm, staffIndex: idx2 };
+          break;
+        }
+      }
+    } finally {
+      if (btn) { btn.disabled = false; btn.textContent = prevTxt; }
+    }
+  }
+
+  if (!found) {
+    errEl.style.display = 'block';
     document.getElementById('login-pw').value = '';
     return;
   }
-  document.getElementById('login-error').style.display = 'none';
+  errEl.style.display = 'none';
   currentUser = found;
   document.getElementById('login-screen').style.display = 'none';
   applyRole();
@@ -4476,6 +4593,7 @@ async function syncData() {
         payrollSettings = Object.assign({}, PAYROLL_DEFAULTS, raw.payrollSettings || {});
         publishLog = Array.isArray(raw.publishLog) ? raw.publishLog : [];
         staffOrder = Array.isArray(raw.staffOrder) ? raw.staffOrder : [];
+        submitOverrides = (raw.submitOverrides && typeof raw.submitOverrides==="object") ? { periods: raw.submitOverrides.periods||{}, staff: raw.submitOverrides.staff||{} } : { periods:{}, staff:{} };
         console.log('✅ 最新データ取得:', staffData.length, '名');
       }
     }
@@ -4622,8 +4740,13 @@ function renderAdjust() {
     Object.keys(dayRec).forEach(name => {
       const si = staffData.findIndex(s => s && s.name === name);
       if (si < 0) return;
+      // 元の希望時間（区分ごと）。確定時間と違えばゴースト表示に使う
+      const wishOf = {};
+      resolveWishShifts(wishData[si], dateKey).forEach(ws => { wishOf[ws.slot] = ws; });
       dayShiftsOf(dateKey, name).forEach(sh => {
-        workers.push({ key: si + '#' + sh.slot, si, slot: sh.slot, name, isHelp:false, _rs: sh.start, _re: sh.end });
+        const ws = wishOf[sh.slot];
+        workers.push({ key: si + '#' + sh.slot, si, slot: sh.slot, name, isHelp:false, _rs: sh.start, _re: sh.end,
+          _wishStart: ws ? ws.start : null, _wishEnd: ws ? ws.end : null });
       });
     });
     helpData.filter(h => h.dateKey ? h.dateKey === dateKey : h.di === di).forEach(h => {
@@ -4705,11 +4828,23 @@ function renderAdjust() {
 
       const cs    = w.cs, ce = w.ce, isMod = w.isMod;
       const c     = slotColor(w.slot);
+      // 元の希望時間が、現在の確定時間と違う場合は、背面に薄い同色のゴースト（希望の名残）を敷く
+      if (w._wishStart && w._wishEnd && (w._wishStart !== cs || w._wishEnd !== ce)) {
+        const gss = timeToSlot(w._wishStart), ges = timeToSlot(w._wishEnd);
+        if (gss >= 0 && ges > gss) {
+          const gL = gss * SW, gW = Math.max(ges - gss, 1) * SW;
+          bars += '<div style="position:absolute;z-index:0;pointer-events:none;top:' + topY + 'px;height:' + (ROW_H-2*PAD) + 'px;'
+            + 'left:' + gL + 'px;width:' + gW + 'px;background:' + c + ';opacity:0.22;border-radius:5px;'
+            + 'border:1.5px dashed ' + c + ';box-sizing:border-box;display:flex;align-items:center;justify-content:center;overflow:hidden">'
+            + '<span style="font-size:8px;font-weight:700;color:' + c + '">希望 ' + w._wishStart + '〜' + w._wishEnd + '</span>'
+            + '</div>';
+        }
+      }
       bars += '<div id="tl-bar-' + w.si + '-' + di + '-' + w.slot + '"'
         + ' class="tl-bar' + (isMod?' modified':'') + '"'
         + ' data-si="' + w.si + '" data-di="' + di + '" data-slot="' + w.slot + '" data-key="' + w.key + '"'
         + ' data-sw="' + SW + '" data-rowh="' + ROW_H + '" data-area="' + AREA_H + '"'
-        + ' style="position:absolute;top:' + topY + 'px;height:' + (ROW_H-2*PAD) + 'px;'
+        + ' style="position:absolute;z-index:1;top:' + topY + 'px;height:' + (ROW_H-2*PAD) + 'px;'
         + 'left:' + bL + 'px;width:' + bW + 'px;'
         + 'background:' + c + ';border-radius:5px;'
         + 'display:flex;align-items:center;cursor:grab;user-select:none;'
@@ -5465,7 +5600,7 @@ const PAYROLL_DEFAULTS = {
   autoBreak: 1,      // 休憩の自動控除
   commutePerDay: 0,  // 通勤手当（1日）
 };
-let payrollSettings = Object.assign({}, PAYROLL_DEFAULTS);
+let payrollSettings = Object.assign({}, PAYROLL_DEFAULTS); submitOverrides = { periods:{}, staff:{} };
 
 const PR_NIGHT_START = 22 * 60;   // 22:00
 const PR_NIGHT_END   = 5 * 60;    // 翌5:00
