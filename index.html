@@ -475,6 +475,12 @@
   .login-hint { margin-top:20px; padding:12px; background:var(--surface2);
     border-radius:var(--radius); font-size:11px; color:var(--text2); line-height:1.8; }
   .login-hint strong { color:var(--text); }
+  .login-tabs { display:flex; gap:4px; background:var(--surface2); border-radius:var(--radius); padding:3px; margin-bottom:18px; }
+  .login-tab { flex:1; padding:8px; border:none; background:none; border-radius:6px; font-size:13px; font-weight:700;
+    font-family:inherit; color:var(--text3); cursor:pointer; display:flex; align-items:center; justify-content:center; gap:5px; }
+  .login-tab.active { background:var(--surface); color:var(--accent-text); box-shadow:var(--shadow); }
+  select.login-input { cursor:pointer; }
+  select.login-input:disabled { background:var(--surface2); color:var(--text3); cursor:not-allowed; }
 
   /* ヘッダーログアウトエリア */
   .topbar-user { display:flex; align-items:center; gap:8px; font-size:12px; }
@@ -722,11 +728,51 @@
       </div>
     </div>
 
-    <div class="login-error" id="login-error" style="display:none">
-      <i class="ti ti-alert-circle" style="font-size:13px"></i>
-      IDまたはパスワードが正しくありません。
+    <div class="login-tabs">
+      <button type="button" class="login-tab active" id="login-tab-staff" onclick="setLoginMode('staff')">
+        <i class="ti ti-user" style="font-size:14px"></i>スタッフ
+      </button>
+      <button type="button" class="login-tab" id="login-tab-admin" onclick="setLoginMode('admin')">
+        <i class="ti ti-shield" style="font-size:14px"></i>管理者
+      </button>
     </div>
 
+    <div class="login-error" id="login-error" style="display:none">
+      <i class="ti ti-alert-circle" style="font-size:13px"></i>
+      <span id="login-error-text">IDまたはパスワードが正しくありません。</span>
+    </div>
+
+    <!-- スタッフログイン：店舗 → 名前 → パスワード -->
+    <div id="login-staff-panel">
+      <div class="login-group">
+        <label class="login-label" for="login-store">店舗</label>
+        <select class="login-input" id="login-store" onchange="onLoginStoreChange()">
+          <option value="">店舗を選んでください</option>
+        </select>
+      </div>
+      <div class="login-group">
+        <label class="login-label" for="login-staff">名前</label>
+        <select class="login-input" id="login-staff" disabled onchange="document.getElementById('login-staff-pw').focus()">
+          <option value="">先に店舗を選んでください</option>
+        </select>
+      </div>
+      <div class="login-group">
+        <label class="login-label" for="login-staff-pw">パスワード</label>
+        <input class="login-input" id="login-staff-pw" type="password"
+          placeholder="パスワード"
+          autocomplete="current-password"
+          onkeydown="if(event.key==='Enter')doStaffLogin()">
+      </div>
+      <button class="login-btn" id="login-staff-btn" onclick="doStaffLogin()">
+        <i class="ti ti-login" style="font-size:16px"></i>ログイン
+      </button>
+      <div style="margin-top:12px;font-size:11px;color:var(--text3);text-align:center">
+        はじめてのパスワードは 1234 です
+      </div>
+    </div>
+
+    <!-- 管理者ログイン -->
+    <div id="login-admin-panel" style="display:none">
     <div class="login-group">
       <label class="login-label">ログインID</label>
       <input class="login-input" id="login-id" type="text"
@@ -759,6 +805,7 @@
     <div style="margin-top:12px;font-size:11px;color:var(--text3);text-align:center">
       スタッフ：苗字ローマ字 / パスワード 1234<br>
       管理者：admin / パスワード admin123
+    </div>
     </div>
   </div>
 </div>
@@ -4455,8 +4502,129 @@ function quickLogin(type) {
   }
 }
 
+// ─── スタッフログイン（店舗 → 名前 → パスワード） ───────────────
+const LAST_LOGIN_STORE_KEY = 'shiftManager.lastLoginStore';
+let loginStaffCache = { storeId: null, staff: [] };
+
+function showLoginError(msg) {
+  const errEl = document.getElementById('login-error');
+  document.getElementById('login-error-text').textContent = msg;
+  errEl.style.display = 'block';
+}
+
+function setLoginMode(mode) {
+  const isStaff = mode !== 'admin';
+  document.getElementById('login-staff-panel').style.display = isStaff ? '' : 'none';
+  document.getElementById('login-admin-panel').style.display = isStaff ? 'none' : '';
+  document.getElementById('login-tab-staff').classList.toggle('active', isStaff);
+  document.getElementById('login-tab-admin').classList.toggle('active', !isStaff);
+  document.getElementById('login-error').style.display = 'none';
+  document.getElementById('login-error-text').textContent = 'IDまたはパスワードが正しくありません。';
+}
+
+function fillLoginStores() {
+  const sel = document.getElementById('login-store');
+  if (!sel) return;
+  sel.innerHTML = '<option value="">店舗を選んでください</option>' +
+    STORES.map(s => `<option value="${s.id}">${s.name}</option>`).join('');
+  let last = '';
+  try { last = localStorage.getItem(LAST_LOGIN_STORE_KEY) || ''; } catch (e) {}
+  if (last && STORES.some(s => s.id === last)) {
+    sel.value = last;
+    onLoginStoreChange();
+  }
+}
+
+async function onLoginStoreChange() {
+  const storeId = document.getElementById('login-store').value;
+  const staffSel = document.getElementById('login-staff');
+  document.getElementById('login-error').style.display = 'none';
+  loginStaffCache = { storeId: null, staff: [] };
+  if (!storeId) {
+    staffSel.innerHTML = '<option value="">先に店舗を選んでください</option>';
+    staffSel.disabled = true;
+    return;
+  }
+  staffSel.innerHTML = '<option value="">読み込み中…</option>';
+  staffSel.disabled = true;
+  let staff = [];
+  try {
+    const snap = await getDoc(getDataDoc(storeId));
+    if (snap.exists() && Array.isArray(snap.data().staffData)) staff = snap.data().staffData;
+  } catch (e) {
+    console.error('❌ スタッフ一覧の読込エラー:', e);
+    staffSel.innerHTML = '<option value="">読み込めませんでした</option>';
+    showLoginError('スタッフ一覧を読み込めませんでした。通信を確認してください。');
+    return;
+  }
+  // 読み込み中に別の店舗が選ばれたら、古い結果は使わない
+  if (document.getElementById('login-store').value !== storeId) return;
+  loginStaffCache = { storeId, staff };
+  const opts = staff
+    .map((s, i) => (s && s.name) ? `<option value="${i}">${escapeLoginHtml(s.name)}</option>` : '')
+    .join('');
+  if (!opts) {
+    staffSel.innerHTML = '<option value="">この店舗にはスタッフがいません</option>';
+    return;
+  }
+  staffSel.innerHTML = '<option value="">名前を選んでください</option>' + opts;
+  staffSel.disabled = false;
+}
+
+function escapeLoginHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
+}
+
+async function doStaffLogin() {
+  const storeId = document.getElementById('login-store').value;
+  const staffVal = document.getElementById('login-staff').value;
+  const pwEl = document.getElementById('login-staff-pw');
+  const pw = pwEl.value.trim();
+
+  if (!storeId) { showLoginError('店舗を選んでください。'); return; }
+  if (staffVal === '' || loginStaffCache.storeId !== storeId) { showLoginError('名前を選んでください。'); return; }
+  const picked = loginStaffCache.staff[Number(staffVal)];
+  if (!picked) { showLoginError('名前を選んでください。'); return; }
+  if (!pw) { showLoginError('パスワードを入力してください。'); return; }
+
+  if (String(picked.loginPw || '1234').trim() !== pw) {
+    showLoginError('パスワードが正しくありません。');
+    pwEl.value = '';
+    pwEl.focus();
+    return;
+  }
+
+  const btn = document.getElementById('login-staff-btn');
+  if (btn) btn.disabled = true;
+  try {
+    // 選んだ店舗のデータを読み込む（保存先 DATA_DOC も切り替わる）
+    if (storeId !== currentStoreId || !staffData.length) {
+      await switchStore(storeId);
+    }
+    // 読み込んだデータの中で本人を特定（同じ位置・同じ名前を優先）
+    let idx = Number(staffVal);
+    if (!staffData[idx] || staffData[idx].name !== picked.name) {
+      idx = staffData.findIndex(s => s && s.name === picked.name);
+    }
+    if (idx < 0) {
+      showLoginError('スタッフ情報が見つかりませんでした。もう一度お試しください。');
+      return;
+    }
+    try { localStorage.setItem(LAST_LOGIN_STORE_KEY, storeId); } catch (e) {}
+    document.getElementById('login-error').style.display = 'none';
+    pwEl.value = '';
+    currentUser = { id: staffData[idx].loginId || '', pw: '', role:'staff', name: staffData[idx].name, staffIndex: idx };
+    document.getElementById('login-screen').style.display = 'none';
+    applyRole();
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
 function doLogout() {
   currentUser = null;
+  document.getElementById('login-staff-pw').value = '';
+  setLoginMode('staff');
   document.getElementById('login-id').value = '';
   document.getElementById('login-pw').value = '';
   document.getElementById('login-error').style.display = 'none';
@@ -6504,6 +6672,10 @@ window.saveWishDataForStaff = saveWishDataForStaff;
 window.quickLogin          = quickLogin;
 window.doLogin             = doLogin;
 window.doLogout            = doLogout;
+window.setLoginMode        = setLoginMode;
+window.onLoginStoreChange  = onLoginStoreChange;
+window.doStaffLogin        = doStaffLogin;
+fillLoginStores();
 window.showPage            = showPage;
 window.autoFillLoginId     = autoFillLoginId;
 window.openAddModal        = openAddModal;
